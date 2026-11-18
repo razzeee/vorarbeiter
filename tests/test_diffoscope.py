@@ -5,12 +5,17 @@ from unittest.mock import AsyncMock, patch
 import httpx2 as httpx
 import pytest
 
+from app.config import settings
 from app.services.diffoscope import (
     DiffoscopeCache,
     DiffoscopeReport,
     fetch_diffoscope_report,
     rewrite_asset_paths,
 )
+
+ARTIFACT_HOST = "reports.s3.eu-west-1.amazonaws.com"
+REPORT_KEY = "diffoscope_result-org.example.App.zip"
+REPORT_URL = f"https://{ARTIFACT_HOST}/{REPORT_KEY}"
 
 
 def create_test_zip() -> bytes:
@@ -75,6 +80,65 @@ class TestDiffoscopeCache:
 
 
 class TestFetchDiffoscopeReport:
+    @pytest.fixture(autouse=True)
+    def configure_host(self, monkeypatch):
+        monkeypatch.setattr(settings, "diffoscope_artifact_host", ARTIFACT_HOST)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "url",
+        [
+            f"http://{ARTIFACT_HOST}/{REPORT_KEY}",
+            f"https://other.s3.eu-west-1.amazonaws.com/{REPORT_KEY}",
+            f"https://{ARTIFACT_HOST}@other.example/{REPORT_KEY}",
+            f"https://{ARTIFACT_HOST}:444/{REPORT_KEY}",
+            f"https://{ARTIFACT_HOST}/archive/{REPORT_KEY}",
+            f"https://{ARTIFACT_HOST}/unrelated.zip",
+            REPORT_URL.replace("org.example", "org%2fexample"),
+            REPORT_URL + "?versionId=123",
+            REPORT_URL + "#part",
+        ],
+    )
+    async def test_rejects_untrusted_stored_url_even_if_cached(self, url):
+        cache = DiffoscopeCache()
+        cache.set(url, DiffoscopeReport(b"html", b"", b""))
+        with (
+            patch("app.services.diffoscope._cache", cache),
+            patch("httpx2.AsyncClient") as client,
+        ):
+            assert await fetch_diffoscope_report(url) is None
+            client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_requires_configured_host(self, monkeypatch):
+        monkeypatch.setattr(settings, "diffoscope_artifact_host", None)
+        with patch("httpx2.AsyncClient") as client:
+            assert await fetch_diffoscope_report(REPORT_URL) is None
+            client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_does_not_follow_redirect(self):
+        requests = []
+
+        def handler(request):
+            requests.append(str(request.url))
+            return httpx.Response(
+                302, headers={"Location": "https://other.example/report.zip"}
+            )
+
+        client_cls = httpx.AsyncClient
+        with (
+            patch("app.services.diffoscope._cache", DiffoscopeCache()),
+            patch(
+                "httpx2.AsyncClient",
+                side_effect=lambda **kwargs: client_cls(
+                    transport=httpx.MockTransport(handler), **kwargs
+                ),
+            ),
+        ):
+            assert await fetch_diffoscope_report(REPORT_URL) is None
+        assert requests == [REPORT_URL]
+
     @pytest.mark.asyncio
     async def test_fetch_success(self):
         zip_content = create_test_zip()
@@ -93,7 +157,7 @@ class TestFetchDiffoscopeReport:
             mock_instance.__aexit__.return_value = None
             mock_client.return_value = mock_instance
 
-            result = await fetch_diffoscope_report("https://example.com/test.zip")
+            result = await fetch_diffoscope_report(REPORT_URL)
 
             assert result is not None
             assert b"common.css" in result.html
@@ -118,9 +182,8 @@ class TestFetchDiffoscopeReport:
             mock_instance.__aexit__.return_value = None
             mock_client.return_value = mock_instance
 
-            url = "https://example.com/test.zip"
-            result1 = await fetch_diffoscope_report(url)
-            result2 = await fetch_diffoscope_report(url)
+            result1 = await fetch_diffoscope_report(REPORT_URL)
+            result2 = await fetch_diffoscope_report(REPORT_URL)
 
             assert mock_instance.get.call_count == 1
             assert result1 == result2
@@ -141,7 +204,7 @@ class TestFetchDiffoscopeReport:
             mock_instance.__aexit__.return_value = None
             mock_client.return_value = mock_instance
 
-            result = await fetch_diffoscope_report("https://example.com/test.zip")
+            result = await fetch_diffoscope_report(REPORT_URL)
             assert result is None
 
     @pytest.mark.asyncio
@@ -160,7 +223,7 @@ class TestFetchDiffoscopeReport:
             mock_instance.__aexit__.return_value = None
             mock_client.return_value = mock_instance
 
-            result = await fetch_diffoscope_report("https://example.com/test.zip")
+            result = await fetch_diffoscope_report(REPORT_URL)
             assert result is None
 
 

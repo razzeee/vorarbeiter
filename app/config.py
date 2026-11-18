@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,6 +39,11 @@ class Settings(BaseSettings):
     source_search_max_bytes: int = 20 * 1024 * 1024
     source_search_max_files: int = 500
     ff_reprocheck_issues: bool = False
+    # Exact virtual-hosted S3 name emitted by flathub-repro-checker.
+    diffoscope_artifact_host: str | None = Field(
+        default=None,
+        pattern=r"^[a-z0-9][a-z0-9.-]*\.s3(?:\.[a-z0-9-]+)?\.amazonaws\.com$",
+    )
     ff_disable_admin_ping_comment: bool = False
     ff_disable_test_builds: bool = False
     max_concurrent_builds: int = 15

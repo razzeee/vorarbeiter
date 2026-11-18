@@ -1,3 +1,4 @@
+import re
 import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -6,9 +7,14 @@ from io import BytesIO
 import httpx2 as httpx
 import structlog
 
+from app.config import settings
+
 logger = structlog.get_logger(__name__)
 
 MAX_CACHE_SIZE = 100
+REPORT_FILENAME = re.compile(
+    r"diffoscope_result-[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){2,}\.zip"
+)
 
 
 @dataclass
@@ -44,13 +50,24 @@ _cache = DiffoscopeCache()
 
 async def fetch_diffoscope_report(result_url: str) -> DiffoscopeReport | None:
     """Fetch and extract diffoscope report from zip URL."""
+    host = settings.diffoscope_artifact_host
+    prefix = f"https://{host}/"
+    if (
+        not host
+        or not isinstance(result_url, str)
+        or not result_url.startswith(prefix)
+        or not REPORT_FILENAME.fullmatch(result_url[len(prefix) :])
+    ):
+        logger.warning("Rejected untrusted diffoscope report URL")
+        return None
+
     cached = _cache.get(result_url)
     if cached:
         logger.debug("Diffoscope report cache hit", url=result_url)
         return cached
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
             response = await client.get(result_url)
             response.raise_for_status()
 
