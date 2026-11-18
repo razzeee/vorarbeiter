@@ -61,6 +61,24 @@ def create_test_zip() -> bytes:
     return buffer.getvalue()
 
 
+def assert_report_isolated(response):
+    directives = {
+        directive.strip()
+        for directive in response.headers["content-security-policy"].split(";")
+    }
+    assert directives == {
+        "sandbox",
+        "default-src 'none'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data:",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'none'",
+    }
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
 class TestViewDiffoscope:
     def test_view_diffoscope_success(
         self, client, mock_db, reprocheck_pipeline_with_result
@@ -68,7 +86,7 @@ class TestViewDiffoscope:
         mock_db.get.return_value = reprocheck_pipeline_with_result
 
         report = DiffoscopeReport(
-            html=b'<html><link href="common.css"></html>',
+            html=b'<link rel="stylesheet" href="common.css"><img src="icon.png">',
             css=b"body { color: red; }",
             icon=b"\x89PNG",
         )
@@ -84,8 +102,10 @@ class TestViewDiffoscope:
 
         assert response.status_code == 200
         assert response.headers["content-type"] == "text/html; charset=utf-8"
-        assert b"/diffoscope/" in response.content
-        assert b"/common.css" in response.content
+        assert_report_isolated(response)
+        base = f"/diffoscope/{reprocheck_pipeline_with_result.id}"
+        assert f'href="{base}/common.css"' in response.text
+        assert f'src="{base}/icon.png"' in response.text
 
     def test_view_diffoscope_not_found(self, client, mock_db):
         mock_db.get.return_value = None
@@ -150,6 +170,7 @@ class TestDiffoscopeCss:
 
         assert response.status_code == 200
         assert response.headers["content-type"] == "text/css; charset=utf-8"
+        assert_report_isolated(response)
         assert response.content == b"body { color: red; }"
 
     def test_get_css_not_available(
@@ -196,6 +217,7 @@ class TestDiffoscopeIcon:
 
         assert response.status_code == 200
         assert response.headers["content-type"] == "image/png"
+        assert_report_isolated(response)
         assert response.content == b"\x89PNG\r\n\x1a\n"
 
     def test_get_icon_not_available(

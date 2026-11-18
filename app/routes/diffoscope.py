@@ -10,6 +10,17 @@ from app.services.diffoscope import fetch_diffoscope_report, rewrite_asset_paths
 
 diffoscope_router = APIRouter(prefix="/diffoscope", tags=["diffoscope"])
 
+# Treat every archive member as untrusted, including assets opened directly.
+REPORT_HEADERS = {
+    "Content-Security-Policy": (
+        "sandbox; default-src 'none'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; base-uri 'none'; form-action 'none'; "
+        "frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
 
 async def _get_result_url(pipeline_id: uuid.UUID) -> str:
     async with get_db(use_replica=True) as db:
@@ -46,7 +57,7 @@ async def view_diffoscope(request: Request, pipeline_id: uuid.UUID) -> Response:
     base_path = f"/diffoscope/{pipeline_id}"
     html = rewrite_asset_paths(report.html, base_path)
 
-    return Response(content=html, media_type="text/html")
+    return Response(content=html, media_type="text/html", headers=REPORT_HEADERS)
 
 
 @diffoscope_router.get("/{pipeline_id}/common.css")
@@ -57,7 +68,7 @@ async def diffoscope_css(pipeline_id: uuid.UUID) -> Response:
     if not report or not report.css:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND)
 
-    return Response(content=report.css, media_type="text/css")
+    return Response(content=report.css, media_type="text/css", headers=REPORT_HEADERS)
 
 
 @diffoscope_router.get("/{pipeline_id}/icon.png")
@@ -68,4 +79,4 @@ async def diffoscope_icon(pipeline_id: uuid.UUID) -> Response:
     if not report or not report.icon:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND)
 
-    return Response(content=report.icon, media_type="image/png")
+    return Response(content=report.icon, media_type="image/png", headers=REPORT_HEADERS)
