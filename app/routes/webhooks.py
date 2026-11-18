@@ -1165,23 +1165,24 @@ async def receive_github_webhook(
             detail="Invalid X-GitHub-Delivery header format (must be a UUID).",
         )
 
-    if settings.github_webhook_secret:
-        if not x_hub_signature_256:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Missing X-Hub-Signature-256 header.",
-            )
+    if not x_hub_signature_256:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing X-Hub-Signature-256 header.",
+        )
 
-        body = await request.body()
-        secret = settings.github_webhook_secret.encode()
-        signature = hmac.new(secret, body, hashlib.sha256).hexdigest()
-        expected_signature = f"sha256={signature}"
+    body = await request.body()
+    secret = settings.github_webhook_secret.encode()
+    signature = hmac.new(secret, body, hashlib.sha256).hexdigest()
+    expected_signature = f"sha256={signature}"
 
-        if not hmac.compare_digest(expected_signature, x_hub_signature_256):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid signature.",
-            )
+    if not hmac.compare_digest(
+        expected_signature.encode(), x_hub_signature_256.encode()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid signature.",
+        )
 
     try:
         payload = await request.json()

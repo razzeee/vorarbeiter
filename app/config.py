@@ -1,8 +1,13 @@
+from typing import Annotated
+
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+NonBlankSecret = Annotated[str, Field(pattern=r"\S", repr=False)]
 
 
 class Settings(BaseSettings):
-    admin_token: str = "raeVenga1eez3Geeca"
+    admin_token: NonBlankSecret
     base_url: str = "http://localhost:8000"
     database_url: str = "postgresql+psycopg://postgres:postgres@db:5432/test_db"
     database_replica_url: str | None = None
@@ -13,7 +18,7 @@ class Settings(BaseSettings):
     github_app_installation_id: int | None = None
     github_app_private_key_file: str | None = None
     github_webhook_hook_id: int | None = None
-    github_webhook_secret: str = "test_webhook_secret"
+    github_webhook_secret: NonBlankSecret
     flat_manager_token: str = "test_repo_token"
     flat_manager_url: str = "https://hub.flathub.org"
     permission_assessment_url: str | None = None
@@ -47,6 +52,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        hide_input_in_errors=True,
     )
 
 

@@ -18,6 +18,7 @@ from app.main import app
 from app.models import InactiveRepoSnapshot, Pipeline, PipelineStatus, PipelineTrigger
 from app.routes.webhooks import WebhookEvent, is_submodule_only_pr
 from tests.conftest import MockHttpxClient, create_mock_get_db
+from tests.webhook_signing import signed_webhook, webhook_signature
 
 # Sample GitHub payloads (simplified)
 SAMPLE_GITHUB_PAYLOAD: dict[str, Any] = {
@@ -183,7 +184,6 @@ def test_receive_github_webhook_success(client: TestClient, mock_db):
 
     with (
         patch("app.routes.webhooks.get_db", mock_get_db),
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch(
             "app.routes.webhooks.is_eol_only_pr",
             AsyncMock(return_value=(False, None)),
@@ -192,8 +192,7 @@ def test_receive_github_webhook_success(client: TestClient, mock_db):
     ):
         response = client.post(
             "/api/webhooks/github",
-            json=SAMPLE_GITHUB_PAYLOAD,
-            headers=headers,
+            **signed_webhook(SAMPLE_GITHUB_PAYLOAD, headers),
         )
 
         assert response.status_code == 202
@@ -224,13 +223,11 @@ async def test_receive_github_webhook_redelivery_is_idempotent(
     create_pipeline = AsyncMock(return_value=None)
     with (
         patch("app.routes.webhooks.get_db", get_db),
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch("app.routes.webhooks.create_pipeline", create_pipeline),
     ):
         response = client.post(
             "/api/webhooks/github",
-            json=SAMPLE_PUSH_PAYLOAD,
-            headers={"X-GitHub-Delivery": delivery_id},
+            **signed_webhook(SAMPLE_PUSH_PAYLOAD, {"X-GitHub-Delivery": delivery_id}),
         )
 
     assert response.status_code == 202
@@ -277,13 +274,11 @@ async def test_receive_github_webhook_rebuilds_when_ref_moves_back(
     create_pipeline = AsyncMock(return_value=None)
     with (
         patch("app.routes.webhooks.get_db", get_db),
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch("app.routes.webhooks.create_pipeline", create_pipeline),
     ):
         response = client.post(
             "/api/webhooks/github",
-            json=SAMPLE_PUSH_PAYLOAD,
-            headers={"X-GitHub-Delivery": delivery_id},
+            **signed_webhook(SAMPLE_PUSH_PAYLOAD, {"X-GitHub-Delivery": delivery_id}),
         )
 
     assert response.status_code == 202
@@ -300,13 +295,13 @@ def test_receive_github_webhook_database_error_is_500(client: TestClient, mock_d
 
     with (
         patch("app.routes.webhooks.get_db", create_mock_get_db(mock_db)),
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch("app.routes.webhooks.create_pipeline", create_pipeline),
     ):
         response = client.post(
             "/api/webhooks/github",
-            json=SAMPLE_PUSH_PAYLOAD,
-            headers={"X-GitHub-Delivery": str(uuid.uuid4())},
+            **signed_webhook(
+                SAMPLE_PUSH_PAYLOAD, {"X-GitHub-Delivery": str(uuid.uuid4())}
+            ),
         )
 
     assert response.status_code == 500
@@ -342,7 +337,6 @@ def test_receive_github_webhook_reacts_to_bot_command(client: TestClient, mock_d
 
     with (
         patch("app.routes.webhooks.get_db", mock_get_db),
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch(
             "app.routes.webhooks.is_eol_only_pr",
             AsyncMock(return_value=(False, None)),
@@ -350,7 +344,9 @@ def test_receive_github_webhook_reacts_to_bot_command(client: TestClient, mock_d
         patch("app.routes.webhooks.create_pipeline", AsyncMock(return_value=None)),
         patch("app.routes.webhooks.add_comment_reaction", mock_reaction),
     ):
-        response = client.post("/api/webhooks/github", json=payload, headers=headers)
+        response = client.post(
+            "/api/webhooks/github", **signed_webhook(payload, headers)
+        )
 
     assert response.status_code == 202
     mock_reaction.assert_awaited_once()
@@ -386,13 +382,12 @@ def test_receive_github_webhook_invalid_json(client: TestClient):
         "X-GitHub-Delivery": delivery_id,
     }
 
-    with patch("app.routes.webhooks.settings.github_webhook_secret", ""):
-        response = client.post(
-            "/api/webhooks/github", content="not-json", headers=headers
-        )
+    response = client.post(
+        "/api/webhooks/github", **signed_webhook(b"not-json", headers)
+    )
 
-        assert response.status_code == 400
-        assert "Invalid JSON payload" in response.json()["detail"]
+    assert response.status_code == 400
+    assert "Invalid JSON payload" in response.json()["detail"]
 
 
 def test_receive_github_webhook_missing_keys(client: TestClient):
@@ -403,11 +398,10 @@ def test_receive_github_webhook_missing_keys(client: TestClient):
         "X-GitHub-Delivery": delivery_id,
     }
 
-    with patch("app.routes.webhooks.settings.github_webhook_secret", ""):
-        response = client.post("/api/webhooks/github", json=payload, headers=headers)
+    response = client.post("/api/webhooks/github", **signed_webhook(payload, headers))
 
-        assert response.status_code == 422
-        assert "Missing expected key in GitHub payload" in response.json()["detail"]
+    assert response.status_code == 422
+    assert "Missing expected key in GitHub payload" in response.json()["detail"]
 
 
 def test_receive_github_webhook_nested_key_error(client: TestClient):
@@ -418,15 +412,13 @@ def test_receive_github_webhook_nested_key_error(client: TestClient):
         "X-GitHub-Delivery": delivery_id,
     }
 
-    with patch("app.routes.webhooks.settings.github_webhook_secret", ""):
-        response = client.post(
-            "/api/webhooks/github",
-            json=payload,
-            headers=headers,
-        )
+    response = client.post(
+        "/api/webhooks/github",
+        **signed_webhook(payload, headers),
+    )
 
-        assert response.status_code == 422
-        assert "Missing expected key in GitHub payload" in response.json()["detail"]
+    assert response.status_code == 422
+    assert "Missing expected key in GitHub payload" in response.json()["detail"]
 
 
 def test_webhook_with_signature_verification_success(client: TestClient, mock_db):
@@ -531,7 +523,6 @@ def test_receive_github_webhook_dispatches_submission_checker_for_new_pr(
     mock_client.request = AsyncMock(return_value=MagicMock())
 
     with (
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch(
             "app.routes.webhooks.get_github_client",
             return_value=mock_client,
@@ -539,8 +530,7 @@ def test_receive_github_webhook_dispatches_submission_checker_for_new_pr(
     ):
         response = client.post(
             "/api/webhooks/github",
-            json=payload,
-            headers=headers,
+            **signed_webhook(payload, headers),
         )
 
     assert response.status_code == 202
@@ -563,7 +553,6 @@ def test_receive_github_webhook_dispatches_merge_for_created_pr_comment(
     headers = {"X-GitHub-Delivery": delivery_id}
 
     with (
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch(
             "app.services.merge_service.handle_merge_command",
             new_callable=Mock,
@@ -572,8 +561,7 @@ def test_receive_github_webhook_dispatches_merge_for_created_pr_comment(
     ):
         response = client.post(
             "/api/webhooks/github",
-            json=SAMPLE_FLATHUB_MERGE_PAYLOAD,
-            headers=headers,
+            **signed_webhook(SAMPLE_FLATHUB_MERGE_PAYLOAD, headers),
         )
 
     assert response.status_code == 202
@@ -589,7 +577,6 @@ def test_receive_github_webhook_ignores_edited_merge_comment(client: TestClient)
     payload["action"] = "edited"
 
     with (
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch(
             "app.services.merge_service.handle_merge_command",
             new_callable=Mock,
@@ -600,7 +587,9 @@ def test_receive_github_webhook_ignores_edited_merge_comment(client: TestClient)
             create_mock_get_db(AsyncMock(spec=AsyncSession)),
         ),
     ):
-        response = client.post("/api/webhooks/github", json=payload, headers=headers)
+        response = client.post(
+            "/api/webhooks/github", **signed_webhook(payload, headers)
+        )
 
     assert response.status_code == 202
     assert response.json()["message"] == "Webhook received"
@@ -615,7 +604,6 @@ def test_receive_github_webhook_ignores_merge_comment_on_issue(client: TestClien
     payload["issue"] = {"number": 42}
 
     with (
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch(
             "app.services.merge_service.handle_merge_command",
             new_callable=Mock,
@@ -626,7 +614,9 @@ def test_receive_github_webhook_ignores_merge_comment_on_issue(client: TestClien
             create_mock_get_db(AsyncMock(spec=AsyncSession)),
         ),
     ):
-        response = client.post("/api/webhooks/github", json=payload, headers=headers)
+        response = client.post(
+            "/api/webhooks/github", **signed_webhook(payload, headers)
+        )
 
     assert response.status_code == 202
     assert response.json()["message"] == "Webhook received"
@@ -649,7 +639,6 @@ def test_receive_github_webhook_routes_app_repo_merge_comment(
     payload = {**SAMPLE_FLATHUB_MERGE_PAYLOAD, "repository": {"full_name": repo}}
 
     with (
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch(
             "app.services.merge_service.handle_app_merge_command",
             new_callable=Mock,
@@ -664,7 +653,9 @@ def test_receive_github_webhook_routes_app_repo_merge_comment(
             create_mock_get_db(AsyncMock(spec=AsyncSession)),
         ),
     ):
-        response = client.post("/api/webhooks/github", json=payload, headers=headers)
+        response = client.post(
+            "/api/webhooks/github", **signed_webhook(payload, headers)
+        )
 
     assert response.status_code == 202
     mock_handle_submission_merge.assert_not_called()
@@ -690,7 +681,6 @@ def test_receive_github_webhook_routes_app_repo_close_comment_on_issue(
     }
 
     with (
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch(
             "app.services.merge_service.handle_close_command",
             new_callable=Mock,
@@ -701,7 +691,9 @@ def test_receive_github_webhook_routes_app_repo_close_comment_on_issue(
             create_mock_get_db(AsyncMock(spec=AsyncSession)),
         ),
     ):
-        response = client.post("/api/webhooks/github", json=payload, headers=headers)
+        response = client.post(
+            "/api/webhooks/github", **signed_webhook(payload, headers)
+        )
 
     assert response.status_code == 202
     if routed:
@@ -721,14 +713,15 @@ def test_receive_github_webhook_dispatches_invite_comment(
         payload["issue"] = {"number": 42}
 
     with (
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch(
             "app.services.invite_service.handle_invite_command",
             new_callable=Mock,
         ) as mock_handle_invite,
         patch("app.routes.webhooks.asyncio.create_task") as mock_create_task,
     ):
-        response = client.post("/api/webhooks/github", json=payload, headers=headers)
+        response = client.post(
+            "/api/webhooks/github", **signed_webhook(payload, headers)
+        )
 
     assert response.status_code == 202
     assert response.json()["message"] == "Invite command received and processing."
@@ -938,17 +931,16 @@ def test_receive_github_webhook_ignore_event(client: TestClient, mock_db):
         "X-GitHub-Delivery": delivery_id,
     }
 
-    with patch("app.routes.webhooks.settings.github_webhook_secret", ""):
-        response = client.post(
-            "/api/webhooks/github", json=SAMPLE_IGNORED_PAYLOAD_1, headers=headers
-        )
+    response = client.post(
+        "/api/webhooks/github", **signed_webhook(SAMPLE_IGNORED_PAYLOAD_1, headers)
+    )
 
-        assert response.status_code == 202
-        response_data = response.json()
-        assert response_data["message"] == "Webhook received"
-        assert response_data["event_id"] == delivery_id
+    assert response.status_code == 202
+    response_data = response.json()
+    assert response_data["message"] == "Webhook received"
+    assert response_data["event_id"] == delivery_id
 
-        mock_db.add.assert_not_called()
+    mock_db.add.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -956,13 +948,11 @@ async def test_receive_github_webhook_ignores_bot_pr(client, mock_db):
     headers = {"X-GitHub-Delivery": str(uuid.uuid4())}
 
     with (
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch("app.routes.webhooks.get_db", return_value=AsyncMock()),
     ):
         response = client.post(
             "/api/webhooks/github",
-            json=SAMPLE_IGNORED_BOT_PR_PAYLOAD,
-            headers=headers,
+            **signed_webhook(SAMPLE_IGNORED_BOT_PR_PAYLOAD, headers),
         )
 
         assert response.status_code == 202
@@ -977,13 +967,11 @@ def test_receive_github_webhook_comments_for_large_app_pr(client):
     }
 
     with (
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch("app.routes.webhooks.create_pr_comment", AsyncMock()) as mock_comment,
     ):
         response = client.post(
             "/api/webhooks/github",
-            json=payload,
-            headers=headers,
+            **signed_webhook(payload, headers),
         )
 
     assert response.status_code == 202
@@ -1015,7 +1003,6 @@ def test_receive_github_webhook_comments_for_inactive_repo_pr(client, mock_db):
     }
 
     with (
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch(
             "app.routes.webhooks.get_db",
             create_mock_get_db(mock_db),
@@ -1024,8 +1011,7 @@ def test_receive_github_webhook_comments_for_inactive_repo_pr(client, mock_db):
     ):
         response = client.post(
             "/api/webhooks/github",
-            json=payload,
-            headers=headers,
+            **signed_webhook(payload, headers),
         )
 
     assert response.status_code == 202
@@ -1112,13 +1098,12 @@ async def test_receive_github_webhook_ignores_submodule_only_pr(client, mock_db)
     mock_db.execute.return_value.scalars.return_value = []
 
     with (
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         patch("app.routes.webhooks.get_db", create_mock_get_db(mock_db)),
         patch("app.pipelines.build.get_db", create_mock_get_db(mock_db)),
         patch("app.routes.webhooks.is_submodule_only_pr", AsyncMock(return_value=True)),
     ):
         response = client.post(
-            "/api/webhooks/github", json=sample_payload, headers=headers
+            "/api/webhooks/github", **signed_webhook(sample_payload, headers)
         )
 
         assert response.status_code == 202
@@ -2053,12 +2038,10 @@ async def test_receive_webhook_creates_pipeline(client, mock_db):
             "app.routes.webhooks.is_eol_only_pr",
             AsyncMock(return_value=(False, None)),
         ),
-        patch("app.routes.webhooks.settings.github_webhook_secret", ""),
     ):
         response = client.post(
             "/api/webhooks/github",
-            json=SAMPLE_GITHUB_PAYLOAD,
-            headers=headers,
+            **signed_webhook(SAMPLE_GITHUB_PAYLOAD, headers),
         )
 
         assert response.status_code == 202
@@ -4258,7 +4241,6 @@ async def test_draft_conversion_bypasses_build_filters(
         db.add(pending)
         await db.commit()
     with (
-        patch.object(settings, "github_webhook_secret", ""),
         patch.object(settings, "ff_disable_test_builds", True),
         patch.object(webhooks, "ensure_draft_pr_comment", AsyncMock()) as comment,
     ):
@@ -4267,8 +4249,7 @@ async def test_draft_conversion_bypasses_build_filters(
         ) as api:
             response = await api.post(
                 "/api/webhooks/github",
-                json=payload,
-                headers={"X-GitHub-Delivery": str(uuid.uuid4())},
+                **signed_webhook(payload, {"X-GitHub-Delivery": str(uuid.uuid4())}),
             )
     assert response.status_code == 202
     comment.assert_awaited_once_with(repo, 123)
@@ -4856,12 +4837,11 @@ async def test_filtered_synchronize_cancels_pending_automatic_request(db_session
                 "app.routes.webhooks.is_eol_only_pr",
                 AsyncMock(return_value=(False, None)),
             ),
-            patch("app.routes.webhooks.settings.github_webhook_secret", ""),
         ):
             response = await receive_github_webhook(
                 request,
                 x_github_delivery=str(uuid.uuid4()),
-                x_hub_signature_256=None,
+                x_hub_signature_256=webhook_signature(await request.body()),
             )
 
         assert (
@@ -4939,7 +4919,6 @@ async def test_synchronize_refreshes_explicit_request_before_filters(
         with (
             patch("app.routes.webhooks.get_db", create_mock_get_db(db)),
             patch("app.routes.webhooks.settings.ff_disable_test_builds", False),
-            patch("app.routes.webhooks.settings.github_webhook_secret", ""),
             patch(
                 "app.routes.webhooks.is_inactive_repository",
                 AsyncMock(return_value=inactive),
@@ -4955,7 +4934,7 @@ async def test_synchronize_refreshes_explicit_request_before_filters(
             response = await receive_github_webhook(
                 request,
                 x_github_delivery=str(uuid.uuid4()),
-                x_hub_signature_256=None,
+                x_hub_signature_256=webhook_signature(await request.body()),
             )
 
         assert response["message"] == "Webhook received"
@@ -5155,7 +5134,6 @@ async def test_edited_base_posts_pending_status(db_session_maker, repos, expecte
     async with db_session_maker() as db:
         with (
             patch("app.routes.webhooks.get_db", create_mock_get_db(db)),
-            patch("app.routes.webhooks.settings.github_webhook_secret", ""),
             patch.object(settings, "permission_status_repos", repos),
             patch(
                 "app.services.permission_assessment.update_commit_status", AsyncMock()
@@ -5163,7 +5141,9 @@ async def test_edited_base_posts_pending_status(db_session_maker, repos, expecte
         ):
             request = Request({"type": "http", "headers": []}, receive)
             await receive_github_webhook(
-                request, x_github_delivery=str(uuid.uuid4()), x_hub_signature_256=None
+                request,
+                x_github_delivery=str(uuid.uuid4()),
+                x_hub_signature_256=webhook_signature(await request.body()),
             )
 
     assert status.await_count == expected

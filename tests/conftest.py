@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Force SQLite for tests
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+os.environ["ADMIN_TOKEN"] = "test-admin-token"
+os.environ["GITHUB_WEBHOOK_SECRET"] = "test-webhook-secret"
 
 import app.utils.flat_manager as flat_manager_module
 import app.utils.github as github_module
@@ -74,7 +76,7 @@ def client():
 
 @pytest.fixture
 def auth_headers():
-    return {"Authorization": "Bearer raeVenga1eez3Geeca"}
+    return {"Authorization": f"Bearer {settings.admin_token}"}
 
 
 @pytest.fixture

@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx2 as httpx
 import pytest
 
-from app.config import settings
 from app.main import app
 from app.services.label_response import (
     LABEL_RESPONSES,
@@ -15,6 +14,7 @@ from app.services.label_response import (
     TOO_NEW_RESPONSE,
     respond_to_label,
 )
+from tests.webhook_signing import signed_webhook
 
 
 class FakeGitHubClient:
@@ -262,15 +262,15 @@ async def deliver(payload: dict, delivery_id: str | None = None):
     ) as api:
         return await api.post(
             "/api/webhooks/github",
-            json=payload,
-            headers={"X-GitHub-Delivery": delivery_id or str(uuid.uuid4())},
+            **signed_webhook(
+                payload, {"X-GitHub-Delivery": delivery_id or str(uuid.uuid4())}
+            ),
         )
 
 
 @pytest.mark.asyncio
 async def test_webhook_posts_label_response_for_flathub_submission():
     with (
-        patch.object(settings, "github_webhook_secret", ""),
         patch(
             "app.routes.webhooks.respond_to_label", AsyncMock(return_value=True)
         ) as respond,
@@ -287,7 +287,6 @@ async def test_redelivered_webhook_posts_once():
     payload = labeled_payload()
 
     with (
-        patch.object(settings, "github_webhook_secret", ""),
         patch("app.utils.github.get_github_client", return_value=client),
     ):
         delivery_id = str(uuid.uuid4())
@@ -310,7 +309,6 @@ async def test_redelivered_webhook_posts_once():
 )
 async def test_webhook_ignores_other_labels_and_repositories(payload):
     with (
-        patch.object(settings, "github_webhook_secret", ""),
         patch("app.routes.webhooks.respond_to_label", AsyncMock()) as respond,
     ):
         response = await deliver(payload)
