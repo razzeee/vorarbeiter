@@ -262,9 +262,7 @@ async def deliver(payload: dict, delivery_id: str | None = None):
     ) as api:
         return await api.post(
             "/api/webhooks/github",
-            **signed_webhook(
-                payload, {"X-GitHub-Delivery": delivery_id or str(uuid.uuid4())}
-            ),
+            **signed_webhook(payload, delivery_id),
         )
 
 
