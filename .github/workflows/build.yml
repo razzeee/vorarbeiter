@@ -46,13 +46,23 @@ on:
         required: false
         default: 'true'
 
+env:
+  CALLBACK_URL: ${{ inputs.callback_url }}
+  APP_ID: ${{ inputs.app_id }}
+  BRANCH: ${{ inputs.flat_manager_repo }}
+  REF: ${{ inputs.git_ref }}
+  EXPECTED_SUBMISSION_SHA: ${{ inputs.expected_submission_sha }}
+  PR_TARGET_BRANCH: ${{ inputs.pr_target_branch }}
+  # Keep the variable name in sync with the linter.
+  REPO: https://github.com/flathub/${{ inputs.app_id }}
+
 jobs:
   check-event-type:
     runs-on: ubuntu-latest
     steps:
       - name: Check event type
         run: |
-          if [[ "${{ github.event_name }}" != "workflow_dispatch" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
             echo "This workflow only supports workflow_dispatch events"
             exit 1
           fi
@@ -63,30 +73,20 @@ jobs:
     steps:
       - name: Report log URL to the backend
         run: |
-          CALLBACK_TOKEN="$(jq -r '.inputs.callback_token' $GITHUB_EVENT_PATH)"
+          CALLBACK_TOKEN="$(jq -er '.inputs.callback_token | strings | select(test("[\r\n]") | not)' "$GITHUB_EVENT_PATH")"
           echo "::add-mask::$CALLBACK_TOKEN"
 
           curl -fsS --retry-all-errors --retry 5 --retry-delay 10 \
             --retry-max-time 150 --connect-timeout 60 -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CALLBACK_TOKEN" \
-            -d '{"log_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
-            "${{ inputs.callback_url }}/log_url"
+            -d "$(jq -n --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" '{log_url: $url}')" \
+            -- "$CALLBACK_URL/log_url"
 
   validate-manifest:
     runs-on: ubuntu-latest
     needs: [check-event-type, update-log-url]
     steps:
-      - name: Set variables
-        run: |
-          echo "APP_ID=${{ inputs.app_id }}" >> $GITHUB_ENV
-          echo "BRANCH=${{ inputs.flat_manager_repo }}" >> $GITHUB_ENV
-          # sync this env var name with linter
-          echo "REPO=https://github.com/flathub/${{ inputs.app_id }}" >> $GITHUB_ENV
-          echo "REF=${{ inputs.git_ref }}" >> $GITHUB_ENV
-          echo "EXPECTED_SUBMISSION_SHA=${{ inputs.expected_submission_sha }}" >> $GITHUB_ENV
-          echo "PR_TARGET_BRANCH=${{ inputs.pr_target_branch }}" >> $GITHUB_ENV
-
       - name: Create work directory
         run: |
           mkdir -p ${GITHUB_WORKSPACE}/work
@@ -186,7 +186,7 @@ jobs:
             ghcr.io/flathub-infra/flatpak-builder-lint:unprivileged \
             /bin/bash -c '
               git config --global --add safe.directory "*"
-              just -f .flathub.justfile checkout $REPO $REF
+              just -f .flathub.justfile -- checkout "$REPO" "$REF"
             '
       - name: Verify submission checkout
         run: |
@@ -197,14 +197,14 @@ jobs:
           fi
 
           if [[ -n "$EXPECTED_SUBMISSION_SHA" ]]; then
-            CALLBACK_TOKEN="$(jq -r '.inputs.callback_token' "$GITHUB_EVENT_PATH")"
+            CALLBACK_TOKEN="$(jq -er '.inputs.callback_token | strings | select(test("[\r\n]") | not)' "$GITHUB_EVENT_PATH")"
             echo "::add-mask::$CALLBACK_TOKEN"
             curl -fsS --retry-all-errors --retry 5 --retry-delay 10 \
               --retry-max-time 150 --connect-timeout 60 -X POST \
               -H "Content-Type: application/json" \
               -H "Authorization: Bearer $CALLBACK_TOKEN" \
               -d "{\"verified_sha\": \"$ACTUAL_SHA\"}" \
-              "${{ inputs.callback_url }}/metadata"
+              -- "$CALLBACK_URL/metadata"
           fi
 
       - name: Detect app ID of the new submission
@@ -219,22 +219,24 @@ jobs:
             -e APP_ID \
             -e TMPDIR=/work/tmp \
             ghcr.io/flathub-infra/flatpak-builder-lint:unprivileged \
-            just -f .flathub.justfile detect-appid /work
+            just -f .flathub.justfile -- detect-appid /work
 
           APP_ID_FILE=${GITHUB_WORKSPACE}/work/app_id
 
           test -f "$APP_ID_FILE" || { echo "Failed to find file $APP_ID_FILE"; exit 1; }
 
-          echo "APP_ID=$(cat $APP_ID_FILE)" >> $GITHUB_ENV
+          APP_ID="$(cat "$APP_ID_FILE")"
+          [[ -n "$APP_ID" && "$APP_ID" != *$'\r'* && "$APP_ID" != *$'\n'* ]] || { echo 'Invalid app ID'; exit 1; }
+          printf 'APP_ID=%s\n' "$APP_ID" >> "$GITHUB_ENV"
 
-          CALLBACK_TOKEN="$(jq -r '.inputs.callback_token' $GITHUB_EVENT_PATH)"
+          CALLBACK_TOKEN="$(jq -er '.inputs.callback_token | strings | select(test("[\r\n]") | not)' "$GITHUB_EVENT_PATH")"
           echo "::add-mask::$CALLBACK_TOKEN"
           curl -fsS -o /dev/null --retry-all-errors --retry 5 --retry-delay 10 \
             --retry-max-time 150 --connect-timeout 60 -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CALLBACK_TOKEN" \
-            -d "{\"app_id\": \"$(cat $APP_ID_FILE)\"}" \
-            "${{ inputs.callback_url }}/metadata"
+            -d "$(jq -n --arg app_id "$APP_ID" '{app_id: $app_id}')" \
+            -- "$CALLBACK_URL/metadata"
 
       - name: Validate manifest
         run: |
@@ -252,7 +254,7 @@ jobs:
             -e REF \
             -e PR_TARGET_BRANCH \
             ghcr.io/flathub-infra/flatpak-builder-lint:unprivileged \
-            just -f .flathub.justfile validate-manifest $APP_ID
+            just -f .flathub.justfile -- validate-manifest "$APP_ID"
 
       - name: Store end-of-life fields
         run: |
@@ -263,7 +265,7 @@ jobs:
             END_OF_LIFE_REBASE=$(jq -r '.["end-of-life-rebase"] // empty' flathub.json 2>/dev/null)
 
             if [[ -n "$END_OF_LIFE" || -n "$END_OF_LIFE_REBASE" ]]; then
-              CALLBACK_TOKEN="$(jq -r '.inputs.callback_token' $GITHUB_EVENT_PATH)"
+              CALLBACK_TOKEN="$(jq -er '.inputs.callback_token | strings | select(test("[\r\n]") | not)' "$GITHUB_EVENT_PATH")"
               echo "::add-mask::$CALLBACK_TOKEN"
 
               JSON_DATA="{}"
@@ -274,7 +276,7 @@ jobs:
                 --retry-max-time 150 --connect-timeout 60 -X POST \
                 -H "Content-Type: application/json" \
                 -H "Authorization: Bearer $CALLBACK_TOKEN" \
-                -d "$JSON_DATA" "${{ inputs.callback_url }}/metadata"
+                -d "$JSON_DATA" -- "$CALLBACK_URL/metadata"
             fi
           fi
 
@@ -300,13 +302,20 @@ jobs:
           ref: ${{ inputs.git_ref }}
 
       - id: set-matrix
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
+          SPOT: ${{ inputs.spot }}
         shell: python
         run: |
           import json
           import os
 
           arches = ["x86_64", "aarch64"]
-          build_type = "${{ inputs.build_type }}"
+          build_type = os.environ["BUILD_TYPE"]
+          spot = os.environ["SPOT"]
+          if build_type not in ("default", "medium", "large") or spot not in ("true", "false"):
+              raise ValueError("Unsupported runner configuration")
+          run = f"{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
 
           if os.path.exists("repo/flathub.json"):
               with open("repo/flathub.json") as f:
@@ -326,9 +335,9 @@ jobs:
                   timeout = 60*9
                   match arch:
                       case "x86_64":
-                          runner = f"runs-on=${{ github.run_id }}-${{ github.run_attempt }}/runner={build_type}-amd64/tag=arch-amd64/retry=false/spot=${{ inputs.spot }}"
+                          runner = f"runs-on={run}/runner={build_type}-amd64/tag=arch-amd64/retry=false/spot={spot}"
                       case "aarch64":
-                          runner = f"runs-on=${{ github.run_id }}-${{ github.run_attempt }}/runner={build_type}-arm64/tag=arch-arm64/retry=false/spot=${{ inputs.spot }}"
+                          runner = f"runs-on={run}/runner={build_type}-arm64/tag=arch-arm64/retry=false/spot={spot}"
                       case _:
                           print(f"Error: Unsupported architecture: {arch}")
                           exit(1)
@@ -346,7 +355,7 @@ jobs:
               matrix["include"].append({"arch": arch, "runner": runner, "timeout-minutes": timeout})
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"matrix={json.dumps(matrix)}\\n")
+              f.write(f"matrix={json.dumps(matrix)}\n")
 
   build:
     needs: [validate-manifest, setup-matrix]
@@ -357,6 +366,9 @@ jobs:
       fail-fast: true
       matrix:
         include: ${{ fromJSON(needs.setup-matrix.outputs.matrix).include }}
+    env:
+      BUILD_URL: ${{ inputs.build_url }}
+      BUILD_ARCH: ${{ matrix.arch }}
     permissions:
       packages: write
     steps:
@@ -366,21 +378,12 @@ jobs:
           show_costs: summary
           metrics: disk
 
-      - name: Set variables
+      - name: Set upload token
         run: |
-          echo "APP_ID=${{ inputs.app_id }}" >> $GITHUB_ENV
-          echo "BRANCH=${{ inputs.flat_manager_repo }}" >> $GITHUB_ENV
-          # sync this env var name with linter
-          echo "REPO=https://github.com/flathub/${{ inputs.app_id }}" >> $GITHUB_ENV
-          echo "REF=${{ inputs.git_ref }}" >> $GITHUB_ENV
-          echo "EXPECTED_SUBMISSION_SHA=${{ inputs.expected_submission_sha }}" >> $GITHUB_ENV
-          echo "PR_TARGET_BRANCH=${{ inputs.pr_target_branch }}" >> $GITHUB_ENV
-          echo "BUILD_URL=${{ inputs.build_url }}" >> $GITHUB_ENV
-          echo "BUILD_ARCH=${{ matrix.arch }}" >> $GITHUB_ENV
-          REPO_TOKEN="$(jq -r '.inputs.flat_manager_token // empty' $GITHUB_EVENT_PATH)"
+          REPO_TOKEN="$(jq -er '.inputs.flat_manager_token // "" | strings | select(test("[\r\n]") | not)' "$GITHUB_EVENT_PATH")"
           if [[ -n "$REPO_TOKEN" ]]; then
             echo "::add-mask::$REPO_TOKEN"
-            echo "REPO_TOKEN=$REPO_TOKEN" >> $GITHUB_ENV
+            printf 'REPO_TOKEN=%s\n' "$REPO_TOKEN" >> "$GITHUB_ENV"
           fi
 
       - name: Create work directory
@@ -513,7 +516,7 @@ jobs:
             ghcr.io/flathub-infra/flatpak-builder-lint:unprivileged \
             /bin/bash -c '
               git config --global --add safe.directory "*"
-              just -f .flathub.justfile checkout $REPO $REF
+              just -f .flathub.justfile -- checkout "$REPO" "$REF"
             '
       - name: Verify submission checkout
         run: |
@@ -535,26 +538,27 @@ jobs:
             -w /work \
             -e APP_ID \
             ghcr.io/flathub-infra/flatpak-builder-lint:unprivileged \
-            just -f .flathub.justfile detect-appid /work
+            just -f .flathub.justfile -- detect-appid /work
 
           APP_ID_FILE=${GITHUB_WORKSPACE}/work/app_id
 
           test -f "$APP_ID_FILE" || { echo "Failed to find file $APP_ID_FILE"; exit 1; }
 
-          APP_ID="$(cat $APP_ID_FILE)"
-          echo "APP_ID=$APP_ID" >> $GITHUB_ENV
+          APP_ID="$(cat "$APP_ID_FILE")"
+          [[ -n "$APP_ID" && "$APP_ID" != *$'\r'* && "$APP_ID" != *$'\n'* ]] || { echo 'Invalid app ID'; exit 1; }
+          printf 'APP_ID=%s\n' "$APP_ID" >> "$GITHUB_ENV"
 
-          CALLBACK_TOKEN="$(jq -r '.inputs.callback_token' $GITHUB_EVENT_PATH)"
+          CALLBACK_TOKEN="$(jq -er '.inputs.callback_token | strings | select(test("[\r\n]") | not)' "$GITHUB_EVENT_PATH")"
           echo "::add-mask::$CALLBACK_TOKEN"
           REPO_TOKEN="$(curl -fsS --retry-all-errors --retry 5 --retry-delay 10 \
             --retry-max-time 150 --connect-timeout 60 -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CALLBACK_TOKEN" \
             -d "$(jq -n --arg app_id "$APP_ID" '{app_id: $app_id}')" \
-            "${{ inputs.callback_url }}/metadata" | jq -r '.flat_manager_token // empty')"
+            -- "$CALLBACK_URL/metadata" | jq -er '.flat_manager_token // "" | strings | select(test("[\r\n]") | not)')"
           test -n "$REPO_TOKEN" || { echo "No upload token returned for $APP_ID"; exit 1; }
           echo "::add-mask::$REPO_TOKEN"
-          echo "REPO_TOKEN=$REPO_TOKEN" >> $GITHUB_ENV
+          printf 'REPO_TOKEN=%s\n' "$REPO_TOKEN" >> "$GITHUB_ENV"
 
       - name: Set up ORAS
         id: setup-oras
@@ -577,8 +581,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           app_id_lc=${APP_ID,,}
-          IMAGE="ghcr.io/flathub-infra/vorarbeiter/cache/flatpak-builder/${app_id_lc}/stable-${{ matrix.arch }}:latest"
-          GH_PACKAGE="vorarbeiter/cache/flatpak-builder/${app_id_lc}/stable-${{ matrix.arch }}"
+          IMAGE="ghcr.io/flathub-infra/vorarbeiter/cache/flatpak-builder/${app_id_lc}/stable-${BUILD_ARCH}:latest"
+          GH_PACKAGE="vorarbeiter/cache/flatpak-builder/${app_id_lc}/stable-${BUILD_ARCH}"
 
           SIZE_MAX=$((6 * 1024 * 1024 * 1024))
 
@@ -602,15 +606,14 @@ jobs:
             fi
           done
 
-          echo "CACHE_SIZE_MAX=$SIZE_MAX" >> $GITHUB_ENV
+          echo "CACHE_SIZE_MAX=$SIZE_MAX" >> "$GITHUB_ENV"
 
           echo "Image size: $SIZE bytes"
 
           if [ "$SIZE" -gt "$SIZE_MAX" ]; then
             echo "Image exceeds $SIZE_MAX bytes. Deleting"
             # ghcr does not support ORAS delete api
-            # oras manifest delete --password "${{ secrets.GITHUB_TOKEN }}" -u "${{ github.actor }}" --force "$IMAGE" || exit 0
-            GH_PACKAGE_ENC=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${GH_PACKAGE}', safe=''))")
+            GH_PACKAGE_ENC=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$GH_PACKAGE")
             gh api --method DELETE \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -622,7 +625,7 @@ jobs:
         run: |
           app_id_lc=${APP_ID,,}
           cd "${GITHUB_WORKSPACE}/work"
-          oras pull ghcr.io/flathub-infra/vorarbeiter/cache/flatpak-builder/${app_id_lc}/stable-${{ matrix.arch }}:latest || exit 0
+          oras pull "ghcr.io/flathub-infra/vorarbeiter/cache/flatpak-builder/${app_id_lc}/stable-${BUILD_ARCH}:latest" || exit 0
 
       - name: Download sources
         run: |
@@ -639,8 +642,8 @@ jobs:
             -e BRANCH \
             ghcr.io/flathub-infra/flatpak-builder-lint:unprivileged \
             /bin/bash -c '
-              just -f .flathub.justfile prepare-env || exit 1
-              just -f .flathub.justfile download-sources $APP_ID || exit 1
+              just -f .flathub.justfile -- prepare-env || exit 1
+              just -f .flathub.justfile -- download-sources "$APP_ID" || exit 1
             '
 
       - name: Build
@@ -661,9 +664,9 @@ jobs:
             -e BUILD_ARCH \
             ghcr.io/flathub-infra/flatpak-builder-lint:unprivileged \
             /bin/bash -c '
-              just -f .flathub.justfile prepare-env || exit 1
-              just -f .flathub.justfile build $APP_ID $REF $BUILD_ARCH || exit 1
-              just -f .flathub.justfile install-if-extra-data $APP_ID $REF || exit 1
+              just -f .flathub.justfile -- prepare-env || exit 1
+              just -f .flathub.justfile -- build "$APP_ID" "$REF" "$BUILD_ARCH" || exit 1
+              just -f .flathub.justfile -- install-if-extra-data "$APP_ID" "$REF" || exit 1
             '
 
       - name: Validate build
@@ -685,7 +688,7 @@ jobs:
             -e PR_TARGET_BRANCH \
             -e BUILD_ARCH \
             ghcr.io/flathub-infra/flatpak-builder-lint:unprivileged \
-            just -f .flathub.justfile validate-build
+            just -f .flathub.justfile -- validate-build
 
       - name: Upload build
         run: |
@@ -698,9 +701,11 @@ jobs:
             -w /work \
             -e REPO_TOKEN \
             ghcr.io/flathub-infra/flatpak-builder-lint:unprivileged \
-            just -f .flathub.justfile upload $BUILD_URL
+            just -f .flathub.justfile -- upload "$BUILD_URL"
 
       - name: Upload build cache
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         if: ${{ inputs.flat_manager_repo == 'stable' && inputs.git_ref == 'refs/heads/master' }}
         run: |
           cd "${GITHUB_WORKSPACE}/work"
@@ -728,7 +733,7 @@ jobs:
             -w /work \
             -e APP_ID \
             ghcr.io/flathub-infra/flatpak-builder-lint:unprivileged \
-            just -f .flathub.justfile prune-cache $APP_ID || exit 0
+            just -f .flathub.justfile -- prune-cache "$APP_ID" || exit 0
 
           SIZE=$(du -sb .flatpak-builder | cut -f1)
           echo "Cache size: $SIZE bytes"
@@ -738,8 +743,8 @@ jobs:
           fi
 
           app_id_lc=${APP_ID,,}
-          oras login ghcr.io --password "${{ secrets.GITHUB_TOKEN }}" -u "${{ github.actor }}" || exit 0
-          oras push ghcr.io/flathub-infra/vorarbeiter/cache/flatpak-builder/${app_id_lc}/stable-${{ matrix.arch }}:latest .flatpak-builder || exit 0
+          oras login ghcr.io --password-stdin -u "$GITHUB_ACTOR" <<< "$GH_TOKEN" || exit 0
+          oras push "ghcr.io/flathub-infra/vorarbeiter/cache/flatpak-builder/${app_id_lc}/stable-${BUILD_ARCH}:latest" .flatpak-builder || exit 0
 
       - name: List files in build directory
         if: always()
@@ -769,7 +774,7 @@ jobs:
             exit 0
           fi
 
-          CALLBACK_TOKEN="$(jq -r '.inputs.callback_token' $GITHUB_EVENT_PATH)"
+          CALLBACK_TOKEN="$(jq -er '.inputs.callback_token | strings | select(test("[\r\n]") | not)' "$GITHUB_EVENT_PATH")"
           echo "::add-mask::$CALLBACK_TOKEN"
 
           COST_RESPONSE=$(curl -s -X POST \
@@ -791,7 +796,7 @@ jobs:
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CALLBACK_TOKEN" \
             -d "{\"cost\": $TOTAL_COST}" \
-            "${{ inputs.callback_url }}/cost" || true
+            -- "$CALLBACK_URL/cost" || true
 
   # Update callback logic if adding new jobs before this
   callback:
@@ -800,22 +805,21 @@ jobs:
     if: ${{ always() }}
     steps:
       - name: Report job status
+        env:
+          RESULTS: ${{ toJson(needs.*.result) }}
+          BUILD_RESULT: ${{ needs.build.result }}
         run: |
-          CALLBACK_TOKEN="$(jq -r '.inputs.callback_token' $GITHUB_EVENT_PATH)"
+          CALLBACK_TOKEN="$(jq -er '.inputs.callback_token | strings | select(test("[\r\n]") | not)' "$GITHUB_EVENT_PATH")"
           echo "::add-mask::$CALLBACK_TOKEN"
 
-          echo "${{ toJson(needs) }}"
+          echo "Needs result: $RESULTS"
 
-          results='${{ toJson(needs.*.result) }}'
-
-          echo "Needs result: $results"
-
-          if echo "$results" | grep -q '"failure"'; then
+          if echo "$RESULTS" | grep -q '"failure"'; then
             status="failure"
-          elif echo "$results" | grep -q '"cancelled"'; then
+          elif echo "$RESULTS" | grep -q '"cancelled"'; then
             status="cancelled"
           # Should be the last job before this "callback" job
-          elif [[ "${{ needs.build.result }}" == "success" ]]; then
+          elif [[ "$BUILD_RESULT" == "success" ]]; then
             status="success"
           else
             status="failure"
@@ -828,4 +832,4 @@ jobs:
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CALLBACK_TOKEN" \
             -d "{\"status\": \"${status}\"}" \
-            "${{ inputs.callback_url }}/status"
+            -- "$CALLBACK_URL/status"

@@ -36,21 +36,26 @@ on:
         required: false
         default: 'master'
 
+env:
+  CALLBACK_URL: ${{ inputs.callback_url }}
+  APP_ID: ${{ inputs.app_id }}
+  BUILD_PIPELINE_ID: ${{ inputs.build_pipeline_id }}
+
 jobs:
   update-log-url:
     runs-on: ubuntu-latest
     steps:
       - name: Report log URL to the backend
         run: |
-          CALLBACK_TOKEN="$(jq -r '.inputs.callback_token' $GITHUB_EVENT_PATH)"
+          CALLBACK_TOKEN="$(jq -er '.inputs.callback_token | strings | select(test("[\r\n]") | not)' "$GITHUB_EVENT_PATH")"
           echo "::add-mask::$CALLBACK_TOKEN"
 
           curl -fsS --retry-all-errors --retry 5 --retry-delay 10 \
             --retry-max-time 150 --connect-timeout 60 -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CALLBACK_TOKEN" \
-            -d '{"log_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
-            "${{ inputs.callback_url }}/log_url"
+            -d "$(jq -n --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" '{log_url: $url}')" \
+            -- "$CALLBACK_URL/log_url"
 
   setup-runner:
     runs-on: ubuntu-latest
@@ -59,13 +64,17 @@ jobs:
       timeout: ${{ steps.set-runner.outputs.timeout }}
     steps:
       - id: set-runner
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
+          SPOT: ${{ inputs.spot }}
         run: |
-          if [[ "${{ inputs.build_type }}" == "default" ]]; then
-            echo "runner=ubuntu-24.04" >> $GITHUB_OUTPUT
-            echo "timeout=360" >> $GITHUB_OUTPUT
+          if [[ "$BUILD_TYPE" == "default" ]]; then
+            echo "runner=ubuntu-24.04" >> "$GITHUB_OUTPUT"
+            echo "timeout=360" >> "$GITHUB_OUTPUT"
           else
-            echo "runner=runs-on=${{ github.run_id }}-${{ github.run_attempt }}/runner=medium-amd64/tag=arch-amd64/retry=false/spot=${{ inputs.spot }}" >> $GITHUB_OUTPUT
-            echo "timeout=240" >> $GITHUB_OUTPUT
+            [[ "$SPOT" == true || "$SPOT" == false ]] || exit 1
+            echo "runner=runs-on=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/runner=medium-amd64/tag=arch-amd64/retry=false/spot=$SPOT" >> "$GITHUB_OUTPUT"
+            echo "timeout=240" >> "$GITHUB_OUTPUT"
           fi
 
   reprocheck:
@@ -126,7 +135,7 @@ jobs:
             -e AWS_S3_BUCKET_NAME \
             -w /reproworkdir \
             ghcr.io/flathub-infra/flatpak-builder-lint:unprivileged \
-            flathub-repro-checker --json --upload-result --appid "${{ inputs.app_id }}" | tee reprocheck-output.json
+            flathub-repro-checker --json --upload-result --appid "$APP_ID" | tee reprocheck-output.json
 
       - name: Save reprocheck output
         if: always()
@@ -134,16 +143,19 @@ jobs:
           if [ -f reprocheck-output.json ]; then
             cp reprocheck-output.json /tmp/reprocheck-result.json
           else
-            echo '{"status_code": "1", "message": "Reprocheck failed to run", "appid": "${{ inputs.app_id }}", "timestamp": "'$(date -u +"%Y-%m-%dT%H:%M:%S.%6N%:z")'"}' > /tmp/reprocheck-result.json
+            jq -n --arg appid "$APP_ID" --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%S.%6N%:z")" \
+              '{status_code: "1", message: "Reprocheck failed to run", $appid, $timestamp}' > /tmp/reprocheck-result.json
           fi
 
       - name: Report job status
         if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
         run: |
-          CALLBACK_TOKEN="$(jq -r '.inputs.callback_token' $GITHUB_EVENT_PATH)"
+          CALLBACK_TOKEN="$(jq -er '.inputs.callback_token | strings | select(test("[\r\n]") | not)' "$GITHUB_EVENT_PATH")"
           echo "::add-mask::$CALLBACK_TOKEN"
 
-          if [[ "${{ job.status }}" == "cancelled" ]]; then
+          if [[ "$JOB_STATUS" == "cancelled" ]]; then
             status="cancelled"
             status_code="1"
             timestamp="$(date -u +\"%Y-%m-%dT%H:%M:%S.%6N%:z\")"
@@ -171,10 +183,10 @@ jobs:
 
           payload=$(jq -n \
             --arg status "$status" \
-            --arg build_pipeline_id "${{ inputs.build_pipeline_id }}" \
+            --arg build_pipeline_id "$BUILD_PIPELINE_ID" \
             --arg status_code "$status_code" \
             --arg timestamp "$timestamp" \
-            --arg appid "${{ inputs.app_id }}" \
+            --arg appid "$APP_ID" \
             --arg result_url "$result_url" \
             --arg message "$message" \
             '{
@@ -192,7 +204,7 @@ jobs:
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CALLBACK_TOKEN" \
             -d "$payload" \
-            "${{ inputs.callback_url }}/reprocheck"
+            -- "$CALLBACK_URL/reprocheck"
 
       - name: Dump reprocheck log
         if: always()
@@ -209,12 +221,12 @@ jobs:
     steps:
       - name: Report job status
         run: |
-          CALLBACK_TOKEN="$(jq -r '.inputs.callback_token' $GITHUB_EVENT_PATH)"
+          CALLBACK_TOKEN="$(jq -er '.inputs.callback_token | strings | select(test("[\r\n]") | not)' "$GITHUB_EVENT_PATH")"
           echo "::add-mask::$CALLBACK_TOKEN"
 
           curl -sS --retry-all-errors --retry 5 --retry-delay 10 \
             --retry-max-time 150 --connect-timeout 60 -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CALLBACK_TOKEN" \
-            -d '{"status": "failure", "build_pipeline_id": "${{ inputs.build_pipeline_id }}"}' \
-            "${{ inputs.callback_url }}/reprocheck"
+            -d "$(jq -n --arg build_pipeline_id "$BUILD_PIPELINE_ID" '{status: "failure", $build_pipeline_id}')" \
+            -- "$CALLBACK_URL/reprocheck"

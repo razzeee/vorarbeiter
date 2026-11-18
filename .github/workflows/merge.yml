@@ -47,7 +47,7 @@ jobs:
           git init -q repo
           cd repo
           git remote add origin "$FORK_URL"
-          git fetch origin "$EXPECTED_SHA"
+          git fetch -- origin "$EXPECTED_SHA"
           fetched_sha=$(git rev-parse FETCH_HEAD)
           [ "$fetched_sha" = "$EXPECTED_SHA" ] || exit 1
 
@@ -110,7 +110,7 @@ jobs:
         working-directory: repo
         run: |
           set -euo pipefail
-          FLATHUBBOT_TOKEN="$(jq -r '.inputs.flathubbot_token' $GITHUB_EVENT_PATH)"
+          FLATHUBBOT_TOKEN="$(jq -er '.inputs.flathubbot_token | strings | select(test("[\r\n]") | not)' "$GITHUB_EVENT_PATH")"
           echo "::add-mask::$FLATHUBBOT_TOKEN"
           AUTH_B64="$(printf 'x-access-token:%s' "$FLATHUBBOT_TOKEN" | base64 -w0)"
           echo "::add-mask::$AUTH_B64"
@@ -125,7 +125,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           set -euo pipefail
-          CALLBACK_TOKEN="$(jq -r '.inputs.callback_token' $GITHUB_EVENT_PATH)"
+          CALLBACK_TOKEN="$(jq -er '.inputs.callback_token | strings | select(test("[\r\n]") | not)' "$GITHUB_EVENT_PATH")"
           echo "::add-mask::$CALLBACK_TOKEN"
           status=failure
           [ "$JOB_STATUS" = "success" ] && status=success
@@ -134,4 +134,4 @@ jobs:
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CALLBACK_TOKEN" \
             -d "{\"status\":\"$status\"}" \
-            "$CALLBACK_URL"
+            -- "$CALLBACK_URL"

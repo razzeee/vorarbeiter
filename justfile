@@ -1,17 +1,17 @@
 default:
   just --list
 
-_get_manifest app_id:
+_get_manifest $app_id:
     #!/usr/bin/env bash
     set -euxo pipefail
-    if [ -f "{{app_id}}.json" ]; then
-        echo "{{app_id}}.json"
-    elif [ -f "{{app_id}}.yaml" ]; then
-        echo "{{app_id}}.yaml"
-    elif [ -f "{{app_id}}.yml" ]; then
-        echo "{{app_id}}.yml"
+    if [ -f "${app_id}.json" ]; then
+        printf './%s\n' "${app_id}.json"
+    elif [ -f "${app_id}.yaml" ]; then
+        printf './%s\n' "${app_id}.yaml"
+    elif [ -f "${app_id}.yml" ]; then
+        printf './%s\n' "${app_id}.yml"
     else
-        echo "Error: No manifest file found for {{app_id}}" >&2
+        echo "Error: No manifest file found for ${app_id}" >&2
         exit 1
     fi
 
@@ -93,13 +93,13 @@ detect-appid $path:
         print("Failed to detect appid")
         sys.exit(1)
 
-checkout repo ref:
+checkout $repo $ref:
     #!/usr/bin/env bash
     set -euxo pipefail
     git config --global --add safe.directory "*"
     git init
-    git remote add origin {{repo}}
-    git fetch --depth 1 origin {{ref}}
+    git remote add -- origin "$repo"
+    git fetch --depth 1 -- origin "$ref"
     reserved=$(git ls-tree --name-only FETCH_HEAD -- repo builddir .flatpak-builder .flathub.justfile tmp .local app_id .ccache-marker)
     if [ -n "$reserved" ]; then
         echo "Repository contains paths reserved for the build: $reserved" >&2
@@ -115,11 +115,11 @@ prepare-env:
     flatpak remote-add --user --if-not-exists flathub-beta https://dl.flathub.org/beta-repo/flathub-beta.flatpakrepo
     git config --global --add safe.directory "*"
 
-validate-manifest app_id:
+validate-manifest $app_id:
     #!/usr/bin/env bash
     set -euxo pipefail
     git config --global --add safe.directory "*"
-    manifest=$(just -f .flathub.justfile _get_manifest {{app_id}})
+    manifest=$(just -f .flathub.justfile -- _get_manifest "$app_id")
 
     case "${REF}" in
         "refs/heads/beta")
@@ -142,11 +142,11 @@ validate-manifest app_id:
 
     flatpak-builder-lint --gha-format --exceptions --exceptions-repo "$exceptions_repo" manifest "$manifest"
 
-download-sources app_id:
+download-sources $app_id:
     #!/usr/bin/env bash
     set -euxo pipefail
 
-    manifest=$(just -f .flathub.justfile _get_manifest {{app_id}})
+    manifest=$(just -f .flathub.justfile -- _get_manifest "$app_id")
 
     max_retries=5
     sleep_seconds=15
@@ -165,11 +165,11 @@ download-sources app_id:
     echo "Failed after $max_retries attempts"
     exit 1
 
-build app_id git_ref build_arch:
+build $app_id $git_ref $build_arch:
     #!/usr/bin/env bash
     set -euxo pipefail
 
-    case "{{git_ref}}" in
+    case "${git_ref}" in
         "refs/heads/master")
             ref_branch="stable"
             ;;
@@ -177,15 +177,14 @@ build app_id git_ref build_arch:
             ref_branch="beta"
             ;;
         refs/heads/branch/*)
-            ref_branch_tmp="{{git_ref}}"
-            ref_branch="${ref_branch_tmp##refs/heads/branch/}"
+            ref_branch="${git_ref##refs/heads/branch/}"
             ;;
         *)
             ref_branch="test"
             ;;
     esac
 
-    manifest=$(just -f .flathub.justfile _get_manifest {{app_id}})
+    manifest=$(just -f .flathub.justfile -- _get_manifest "$app_id")
     subject=$(just -f .flathub.justfile _get_build_subject)
 
     deps_args="--install-deps-from=flathub"
@@ -206,7 +205,7 @@ build app_id git_ref build_arch:
 
     extra_args=""
 
-    if [ "{{build_arch}}" = "x86_64" ]; then
+    if [ "${build_arch}" = "x86_64" ]; then
         extra_args="$extra_args --bundle-sources"
     fi
 
@@ -227,11 +226,11 @@ build app_id git_ref build_arch:
         --override-source-date-epoch 1321009871 \
         builddir "$manifest"
 
-install-if-extra-data app_id git_ref:
+install-if-extra-data $app_id $git_ref:
     #!/usr/bin/env bash
     set -euxo pipefail
 
-    case "{{git_ref}}" in
+    case "${git_ref}" in
         "refs/heads/master" | "refs/heads/beta" | refs/heads/branch/*)
             echo "Not a test build, skipping install test"
             exit 0
@@ -246,7 +245,7 @@ install-if-extra-data app_id git_ref:
     echo "Extra-data sources detected, testing install..."
 
     flatpak remote-add --user --no-gpg-verify local-test repo
-    flatpak install -y --user --no-related --no-deps local-test {{app_id}}
+    flatpak install -y --user --no-related --no-deps -- local-test "$app_id"
 
 validate-build:
     #!/usr/bin/env bash
@@ -288,12 +287,12 @@ validate-build:
 
     flatpak-builder-lint "${lint_args[@]}" repo repo
 
-upload url:
+upload $url:
     #!/usr/bin/env bash
     set -euxo pipefail
 
     for attempt in 1 2 3 4 5; do
-        if flat-manager-client push "{{url}}" repo; then
+        if flat-manager-client push -- "$url" repo; then
             exit 0
         fi
         if [ "$attempt" -eq 5 ]; then
@@ -303,10 +302,10 @@ upload url:
         sleep $((attempt * 15))
     done
 
-prune-cache app_id:
+prune-cache $app_id:
     #!/usr/bin/env bash
     set -euxo pipefail
-    manifest=$(just -f .flathub.justfile _get_manifest {{app_id}})
+    manifest=$(just -f .flathub.justfile -- _get_manifest "$app_id")
     manifest_json=$(flatpak-builder --show-manifest "$manifest")
     checksums=$(jq -r '.. | objects | (.md5, .sha1, .sha256, .sha512) | strings' <<< "$manifest_json")
     for dir in .flatpak-builder/downloads/*/; do
@@ -353,9 +352,9 @@ prune-cache app_id:
         find .flatpak-builder/ccache -type f ! -newer .ccache-marker -delete
     fi
 
-show-runtime app_id:
+show-runtime $app_id:
     #!/usr/bin/env bash
     set -euxo pipefail
     git config --global --add safe.directory "*"
-    manifest=$(just -f .flathub.justfile _get_manifest {{app_id}})
+    manifest=$(just -f .flathub.justfile -- _get_manifest "$app_id")
     flatpak-builder --show-manifest "$manifest" | jq -r '"\(.runtime)-\(."runtime-version")"'
